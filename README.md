@@ -162,4 +162,4 @@ Tracked in [`DESIGN.md`](DESIGN.md). The hybrid pipeline is feature-complete; th
 
 ## License
 
-Not yet licensed — internal project. If you stumble on it, treat it as **all rights reserved** until a license file lands.
+MIT — see [`LICENSE`](LICENSE).
