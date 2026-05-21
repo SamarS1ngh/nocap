@@ -57,7 +57,10 @@ class NocapNotificationListenerService : NotificationListenerService() {
     ) {
         // Skip cancellations we initiated ourselves — they'd label our own predictions.
         if (reason == REASON_LISTENER_CANCEL) return
-        if (reason != REASON_CLICK && reason != REASON_CANCEL) return
+        if (reason !in setOf(REASON_CLICK, REASON_CANCEL, REASON_APP_CANCEL)) return
+
+        // Capture this BEFORE we go async — the SBN reference is freshest here.
+        val hadActions = (sbn.notification.actions?.size ?: 0) > 0
 
         val app = applicationContext as NocapApp
         scope.launch {
@@ -71,7 +74,17 @@ class NocapNotificationListenerService : NotificationListenerService() {
             val dwellMs = System.currentTimeMillis() - row.postedAt
             val labelAndSource: Pair<Float, String> = when (reason) {
                 REASON_CLICK -> 1.0f to "click"
-                REASON_CANCEL -> if (dwellMs < FAST_SWIPE_MS) 0.0f to "fast_swipe" else return@launch
+                REASON_CANCEL ->
+                    if (dwellMs < FAST_SWIPE_MS) 0.0f to "fast_swipe" else return@launch
+                REASON_APP_CANCEL ->
+                    // App-driven cancel after a user action (Reply / Mark read / Like / ...).
+                    // We can't see the action itself; infer engagement from:
+                    //   - the notification exposed ≥1 inline action,
+                    //   - it disappeared in a plausible user-driven timeframe.
+                    // Outside those gates it's likely a background sync cancellation — ignore.
+                    if (hadActions && dwellMs < APP_ACTION_MAX_DWELL_MS)
+                        1.0f to "app_action"
+                    else return@launch
                 else -> return@launch
             }
 
@@ -288,11 +301,16 @@ class NocapNotificationListenerService : NotificationListenerService() {
     companion object {
         private const val TAG = "NocapListener"
         private const val FAST_SWIPE_MS = 5_000L
+        // Generous: any user-driven action (reply, mark-read, like) should land
+        // well inside a minute. Beyond that, the app probably auto-cleaned for
+        // an unrelated reason.
+        private const val APP_ACTION_MAX_DWELL_MS = 60_000L
 
         // Mirror of platform constants — keep here so the module doesn't drag in
         // the full reason enum surface.
         private const val REASON_CLICK = 1
         private const val REASON_CANCEL = 2
+        private const val REASON_APP_CANCEL = 5
         private const val REASON_LISTENER_CANCEL = 10
 
         fun isEnabled(context: Context): Boolean {
