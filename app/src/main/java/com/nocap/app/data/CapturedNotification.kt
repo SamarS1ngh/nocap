@@ -30,4 +30,19 @@ data class CapturedNotification(
      * Schema = com.nocap.app.diag.PredictionPayload.
      */
     val predictionJson: String? = null,
+    /**
+     * How many times the source app re-posted this notification while it was live.
+     * Used to detect inline-reply / inline-action engagement on apps that DON'T
+     * auto-dismiss after the action (WhatsApp, IG, Slack, ...). A swipe on a row
+     * with updateCount > 0 is treated as "no signal" — the user engaged, then
+     * cleaned up — instead of incorrectly labeling it SKIP.
+     */
+    val updateCount: Int = 0,
+    /**
+     * Timestamp when the source notification left the shade. Null while the
+     * notification is still live. Lets us distinguish a true new notification
+     * that reuses a key (after dismissal) from an in-place update of a live
+     * notification.
+     */
+    val removedAt: Long? = null,
 )

@@ -147,6 +147,35 @@ interface NotificationDao {
     @Query("SELECT * FROM captured_notifications WHERE notificationKey = :key ORDER BY postedAt DESC LIMIT 1")
     suspend fun findByKey(key: String): CapturedNotification?
 
+    /**
+     * Most-recent row for a key that is still live (never removed). Used by the
+     * listener to decide whether a new post is an UPDATE of an existing live
+     * notification or a fresh notification that reused the key.
+     */
+    @Query(
+        """
+        SELECT * FROM captured_notifications
+         WHERE notificationKey = :key AND removedAt IS NULL
+         ORDER BY postedAt DESC LIMIT 1
+        """
+    )
+    suspend fun findLiveByKey(key: String): CapturedNotification?
+
+    @Query(
+        """
+        UPDATE captured_notifications
+           SET title = :title,
+               text = :body,
+               postedAt = :postedAt,
+               updateCount = updateCount + 1
+         WHERE id = :id
+        """
+    )
+    suspend fun recordUpdate(id: Long, title: String, body: String, postedAt: Long)
+
+    @Query("UPDATE captured_notifications SET removedAt = :removedAt WHERE id = :id")
+    suspend fun markRemoved(id: Long, removedAt: Long)
+
     @Query("SELECT * FROM captured_notifications WHERE id = :id LIMIT 1")
     suspend fun findById(id: Long): CapturedNotification?
 

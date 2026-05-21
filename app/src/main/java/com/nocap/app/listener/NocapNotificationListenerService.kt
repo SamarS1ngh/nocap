@@ -41,8 +41,27 @@ class NocapNotificationListenerService : NotificationListenerService() {
         )
 
         scope.launch {
+            val dao = app.database.notifications()
+            // If a live row already exists for this key, this is an UPDATE (the
+            // source app reposted — likely after the user replied / liked / etc.).
+            // Bump updateCount instead of inserting a fresh row + re-classifying.
+            val live = try {
+                dao.findLiveByKey(sbn.key)
+            } catch (t: Throwable) {
+                Log.w(TAG, "findLiveByKey failed", t)
+                null
+            }
+            if (live != null) {
+                try {
+                    dao.recordUpdate(live.id, title, body, sbn.postTime)
+                } catch (t: Throwable) {
+                    Log.w(TAG, "recordUpdate failed for id=${live.id}", t)
+                }
+                return@launch
+            }
+
             val id = try {
-                app.database.notifications().insert(captured)
+                dao.insert(captured)
             } catch (t: Throwable) {
                 Log.e(TAG, "insert failed", t)
                 return@launch
@@ -80,7 +99,18 @@ class NocapNotificationListenerService : NotificationListenerService() {
 
                 // Per-notification swipe. Trust the user — if they specifically
                 // dismissed this row, it's a SKIP signal. Timing irrelevant.
-                REASON_CANCEL -> 0.0f to "swipe"
+                // EXCEPTION: if the notification was updated at least once while
+                // it was live, the user likely engaged via an inline action
+                // (reply / like / mark-read) and then swiped to clean up. We
+                // can't tell that case from "5 spam messages then swipe," so
+                // we abstain — no label is safer than a wrong label.
+                REASON_CANCEL -> {
+                    if (row.updateCount > 0) {
+                        markRemoved(app, row.id)
+                        return@launch
+                    }
+                    0.0f to "swipe"
+                }
 
                 // Clear-all button hits every notification in the shade at once.
                 // User explicitly opted to wipe them all → label every one as SKIP.
@@ -89,20 +119,32 @@ class NocapNotificationListenerService : NotificationListenerService() {
                 REASON_CANCEL_ALL -> 0.0f to "clear_all"
 
                 // App-driven cancel — usually fires after the user used an inline
-                // action (Reply / Mark read / Like / ...). We can't observe the
-                // action directly, so we infer:
+                // action on an app that auto-dismisses (Gmail "Mark read", some
+                // calendar apps). We infer:
                 //   - the notification had ≥1 action (something to interact with),
                 //   - the phone was interactive at remove time (a human was present).
                 // Background sync cancellations on a locked phone fall through.
                 REASON_APP_CANCEL ->
                     if (hadActions && interactiveNow) 1.0f to "app_action"
-                    else return@launch
+                    else {
+                        markRemoved(app, row.id)
+                        return@launch
+                    }
 
                 else -> return@launch
             }
 
             val (label, source) = labelAndSource
             learn(app, row, label, source)
+            markRemoved(app, row.id)
+        }
+    }
+
+    private suspend fun markRemoved(app: NocapApp, rowId: Long) {
+        try {
+            app.database.notifications().markRemoved(rowId, System.currentTimeMillis())
+        } catch (t: Throwable) {
+            Log.w(TAG, "markRemoved failed for id=$rowId", t)
         }
     }
 
