@@ -1,0 +1,24 @@
+*.iml
+.gradle/
+.kotlin/
+local.properties
+.idea/
+.DS_Store
+build/
+captures/
+.externalNativeBuild/
+.cxx/
+*.apk
+*.aab
+*.keystore
+*.jks
+
+# Python venv for tools/convert_minilm.py
+.venv/
+__pycache__/
+*.pyc
+
+# Generated ML assets — not committed; produced by tools/convert_minilm.py
+embedding-engine/src/main/assets/minilm.tflite
+embedding-engine/src/main/assets/vocab.txt
+tools/build/
