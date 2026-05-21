@@ -147,6 +147,9 @@ interface NotificationDao {
     @Query("SELECT * FROM captured_notifications WHERE notificationKey = :key ORDER BY postedAt DESC LIMIT 1")
     suspend fun findByKey(key: String): CapturedNotification?
 
+    @Query("SELECT * FROM captured_notifications WHERE id = :id LIMIT 1")
+    suspend fun findById(id: Long): CapturedNotification?
+
     @Query(
         """
         SELECT packageName FROM captured_notifications

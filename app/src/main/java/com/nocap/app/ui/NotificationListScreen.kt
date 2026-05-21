@@ -2,7 +2,6 @@ package com.nocap.app.ui
 
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.Image
-import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -19,25 +18,32 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.ScrollableTabRow
+import androidx.compose.material3.Tab
+import androidx.compose.material3.TabRowDefaults
+import androidx.compose.material3.TabRowDefaults.tabIndicatorOffset
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -49,6 +55,9 @@ import com.nocap.app.diag.PredictionPayload
 import java.text.DateFormat
 import java.util.Date
 
+private const val ALL_TAB_KEY = "__all__"
+
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun NotificationListScreen(vm: NotificationListViewModel = viewModel()) {
     val items by vm.notifications.collectAsStateWithLifecycle(initialValue = emptyList())
@@ -63,99 +72,87 @@ fun NotificationListScreen(vm: NotificationListViewModel = viewModel()) {
         return
     }
 
-    // Group by package, sort groups by most-recent notification inside each.
+    // Tab list: "All" first, then one tab per package sorted by most-recent activity.
     val groups = remember(items) {
         items
             .groupBy { it.packageName }
             .toList()
             .sortedByDescending { (_, rows) -> rows.maxOf { it.postedAt } }
     }
+    val tabs = remember(groups) {
+        buildList {
+            add(ALL_TAB_KEY to items.size)
+            groups.forEach { (pkg, rows) -> add(pkg to rows.size) }
+        }
+    }
 
-    // Per-app collapse state (default: expanded for the top app, collapsed for the rest).
-    val appExpanded = remember { mutableStateMapOf<String, Boolean>() }
-    // Per-notification expand state (default collapsed — show 2-line preview).
+    var selectedKey by remember { mutableStateOf(ALL_TAB_KEY) }
+    // Guard against a tab disappearing (app uninstalled while list is open).
+    val selectedIndex = tabs.indexOfFirst { it.first == selectedKey }.coerceAtLeast(0)
+    if (tabs.getOrNull(selectedIndex)?.first != selectedKey) {
+        selectedKey = tabs[selectedIndex].first
+    }
+
+    val filteredItems = remember(items, selectedKey) {
+        if (selectedKey == ALL_TAB_KEY) items else items.filter { it.packageName == selectedKey }
+    }
+
     val cardExpanded = remember { mutableStateMapOf<Long, Boolean>() }
 
-    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(vertical = 8.dp)) {
-        groups.forEachIndexed { idx, (pkg, rows) ->
-            val expanded = appExpanded[pkg] ?: (idx == 0)
-
-            item(key = "header-$pkg") {
-                AppHeader(
-                    packageName = pkg,
-                    count = rows.size,
-                    expanded = expanded,
-                    onToggle = { appExpanded[pkg] = !expanded },
+    Column(Modifier.fillMaxSize()) {
+        ScrollableTabRow(
+            selectedTabIndex = selectedIndex,
+            edgePadding = 8.dp,
+            indicator = { positions ->
+                TabRowDefaults.SecondaryIndicator(
+                    Modifier.tabIndicatorOffset(positions[selectedIndex]),
+                )
+            },
+        ) {
+            tabs.forEachIndexed { index, (key, count) ->
+                Tab(
+                    selected = index == selectedIndex,
+                    onClick = { selectedKey = key },
+                    text = { TabLabel(key, count) },
                 )
             }
+        }
 
-            if (expanded) {
-                items(rows, key = { it.id }) { n ->
-                    NotificationCard(
-                        n = n,
-                        expanded = cardExpanded[n.id] ?: false,
-                        onToggleExpand = { cardExpanded[n.id] = !(cardExpanded[n.id] ?: false) },
-                        onFeedback = { value -> vm.setFeedback(n.id, value) },
-                        onManualClassify = { imp -> vm.manualClassify(n.id, imp) },
-                    )
-                }
+        LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(vertical = 8.dp)) {
+            items(filteredItems, key = { it.id }) { n ->
+                NotificationCard(
+                    n = n,
+                    expanded = cardExpanded[n.id] ?: false,
+                    onToggleExpand = { cardExpanded[n.id] = !(cardExpanded[n.id] ?: false) },
+                    onClassify = { choice -> vm.classifyAndLearn(n.id, choice) },
+                )
             }
         }
     }
 }
 
 @Composable
-private fun AppHeader(
-    packageName: String,
-    count: Int,
-    expanded: Boolean,
-    onToggle: () -> Unit,
-) {
-    val ctx = LocalContext.current
-    val info = remember(packageName) {
-        (ctx.applicationContext as NocapApp).appLabels.resolve(packageName)
+private fun TabLabel(key: String, count: Int) {
+    if (key == ALL_TAB_KEY) {
+        Text("All ($count)")
+        return
     }
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .background(MaterialTheme.colorScheme.surfaceVariant)
-            .clickable(onClick = onToggle)
-            .padding(horizontal = 16.dp, vertical = 10.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(
-            if (expanded) "▾" else "▸",
-            style = MaterialTheme.typography.titleMedium,
-            modifier = Modifier.padding(end = 8.dp),
-        )
+    val ctx = LocalContext.current
+    val info = remember(key) {
+        (ctx.applicationContext as NocapApp).appLabels.resolve(key)
+    }
+    Row(verticalAlignment = Alignment.CenterVertically) {
         if (info.icon != null) {
             Image(
                 bitmap = info.icon.asImageBitmap(),
                 contentDescription = null,
                 modifier = Modifier
-                    .size(28.dp)
-                    .clip(RoundedCornerShape(6.dp))
-                    .padding(end = 0.dp),
+                    .size(18.dp)
+                    .clip(RoundedCornerShape(4.dp)),
             )
-            Spacer(Modifier.width(10.dp))
+            Spacer(Modifier.width(6.dp))
         }
-        Column(Modifier.weight(1f)) {
-            Text(
-                info.label,
-                style = MaterialTheme.typography.titleSmall,
-                fontWeight = FontWeight.SemiBold,
-            )
-            Text(
-                packageName,
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-        Text(
-            "$count",
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
+        Text("${info.label} ($count)")
     }
 }
 
@@ -164,8 +161,7 @@ private fun NotificationCard(
     n: CapturedNotification,
     expanded: Boolean,
     onToggleExpand: () -> Unit,
-    onFeedback: (Int) -> Unit,
-    onManualClassify: (Int) -> Unit,
+    onClassify: (NotificationListViewModel.Choice) -> Unit,
 ) {
     Card(
         Modifier
@@ -175,49 +171,7 @@ private fun NotificationCard(
             .clickable(onClick = onToggleExpand)
     ) {
         Column(Modifier.padding(12.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    DateFormat.getTimeInstance(DateFormat.SHORT).format(Date(n.postedAt)),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.weight(1f),
-                )
-                FeedbackBadge(feedback = n.feedback, source = n.feedbackSource)
-                if (n.category == "failed") {
-                    if (n.feedback != 0) Spacer(Modifier.width(6.dp))
-                    AssistChip(
-                        onClick = {},
-                        label = {
-                            Text(
-                                "FAILED",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = Color.White,
-                            )
-                        },
-                        colors = AssistChipDefaults.assistChipColors(
-                            containerColor = Color(0xFFC62828),
-                            labelColor = Color.White,
-                        )
-                    )
-                }
-                if (n.hidden) {
-                    if (n.feedback != 0 || n.category == "failed") Spacer(Modifier.width(6.dp))
-                    AssistChip(
-                        onClick = {},
-                        label = {
-                            Text(
-                                "FILTERED",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = Color.Black,
-                            )
-                        },
-                        colors = AssistChipDefaults.assistChipColors(
-                            containerColor = Color(0xFFE0E0E0),
-                            labelColor = Color.Black,
-                        )
-                    )
-                }
-            }
+            CardTopRow(n = n, onToggleExpand = onToggleExpand)
             Spacer(Modifier.height(4.dp))
             Text(
                 n.title.ifBlank { "(no title)" },
@@ -236,7 +190,15 @@ private fun NotificationCard(
 
             AnimatedVisibility(visible = expanded) {
                 Column {
-                    if (n.category != null && n.importance != null) {
+                    if (n.category == "failed") {
+                        Spacer(Modifier.height(8.dp))
+                        FailedClassifyPanel(
+                            reason = n.reason,
+                            onMarkImportant = { onClassify(NotificationListViewModel.Choice.IMPORTANT) },
+                            onMarkNeutral = { onClassify(NotificationListViewModel.Choice.NEUTRAL) },
+                            onMarkJunk = { onClassify(NotificationListViewModel.Choice.JUNK) },
+                        )
+                    } else if (n.category != null && n.importance != null) {
                         Spacer(Modifier.height(8.dp))
                         AssistChip(
                             onClick = {},
@@ -276,14 +238,9 @@ private fun NotificationCard(
                             Spacer(Modifier.height(10.dp))
                             PredictorBreakdown(payload)
                         }
-                    } else if (n.category == "failed") {
-                        Spacer(Modifier.height(8.dp))
-                        FailedClassifyPanel(
-                            reason = n.reason,
-                            onMarkImportant = { onManualClassify(9) },
-                            onMarkNeutral = { onManualClassify(5) },
-                            onMarkJunk = { onManualClassify(1) },
-                        )
+
+                        Spacer(Modifier.height(12.dp))
+                        ClassifyStrip(currentImportance = n.importance, onClassify = onClassify)
                     } else {
                         Spacer(Modifier.height(6.dp))
                         Text(
@@ -294,29 +251,11 @@ private fun NotificationCard(
                     }
 
                     Spacer(Modifier.height(10.dp))
-                    Row(
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            DateFormat.getDateTimeInstance().format(Date(n.postedAt)),
-                            style = MaterialTheme.typography.labelSmall,
-                            modifier = Modifier.weight(1f)
-                        )
-                        FeedbackButton(
-                            label = "Want",
-                            active = n.feedback == 1,
-                            activeColor = Color(0xFF2E7D32),
-                            onClick = { onFeedback(if (n.feedback == 1) 0 else 1) },
-                        )
-                        FeedbackButton(
-                            label = "Skip",
-                            active = n.feedback == -1,
-                            activeColor = Color(0xFFC62828),
-                            onClick = { onFeedback(if (n.feedback == -1) 0 else -1) },
-                        )
-                    }
+                    Text(
+                        DateFormat.getDateTimeInstance().format(Date(n.postedAt)),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
             }
         }
@@ -324,31 +263,82 @@ private fun NotificationCard(
 }
 
 @Composable
-private fun FeedbackButton(
-    label: String,
-    active: Boolean,
-    activeColor: Color,
-    onClick: () -> Unit,
+private fun CardTopRow(
+    n: CapturedNotification,
+    onToggleExpand: () -> Unit,
 ) {
-    if (active) {
-        Button(
-            onClick = onClick,
-            colors = ButtonDefaults.buttonColors(
-                containerColor = activeColor,
-                contentColor = Color.White,
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(
+            DateFormat.getTimeInstance(DateFormat.SHORT).format(Date(n.postedAt)),
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.weight(1f),
+        )
+        ManualClassifyBadge(n)
+        // FeedbackBadge only for IMPLICIT signals from the shade — manual-classify
+        // overlaps with ManualClassifyBadge above so we hide it for manual rows.
+        if (n.category != "manual") {
+            FeedbackBadge(feedback = n.feedback, source = n.feedbackSource)
+        }
+        if (n.category == "failed") {
+            Spacer(Modifier.width(6.dp))
+            AssistChip(
+                onClick = onToggleExpand,
+                label = {
+                    Text(
+                        "FAILED · tap to classify",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Color.White,
+                    )
+                },
+                colors = AssistChipDefaults.assistChipColors(
+                    containerColor = Color(0xFFC62828),
+                    labelColor = Color.White,
+                )
             )
-        ) { Text(label, style = MaterialTheme.typography.labelSmall) }
-    } else {
-        OutlinedButton(onClick = onClick) {
-            Text(label, style = MaterialTheme.typography.labelSmall)
+        }
+        if (n.hidden) {
+            Spacer(Modifier.width(6.dp))
+            AssistChip(
+                onClick = {},
+                label = {
+                    Text(
+                        "FILTERED",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Color.Black,
+                    )
+                },
+                colors = AssistChipDefaults.assistChipColors(
+                    containerColor = Color(0xFFE0E0E0),
+                    labelColor = Color.Black,
+                )
+            )
         }
     }
 }
 
-private fun importanceColor(importance: Int): Color = when {
-    importance >= 8 -> Color(0xFFB9F6CA)
-    importance >= 5 -> Color(0xFFFFF59D)
-    else -> Color(0xFFFFCDD2)
+@Composable
+private fun ManualClassifyBadge(n: CapturedNotification) {
+    if (n.category != "manual" || n.importance == null) return
+    val (label, color) = when {
+        n.importance >= 7 -> "⭐ IMPORTANT" to Color(0xFF2E7D32)
+        n.importance >= 4 -> "○ NEUTRAL" to Color(0xFF6D6D6D)
+        else -> "✗ JUNK" to Color(0xFFC62828)
+    }
+    AssistChip(
+        onClick = {},
+        label = {
+            Text(
+                label,
+                style = MaterialTheme.typography.labelSmall,
+                color = Color.White,
+            )
+        },
+        colors = AssistChipDefaults.assistChipColors(
+            containerColor = color,
+            labelColor = Color.White,
+        )
+    )
 }
 
 @Composable
@@ -415,6 +405,7 @@ private fun FeedbackBadge(feedback: Int, source: String?) {
             else -> append(" · ").append(source)
         }
     }
+    Spacer(Modifier.width(6.dp))
     AssistChip(
         onClick = {},
         label = {
@@ -432,7 +423,7 @@ private fun FeedbackBadge(feedback: Int, source: String?) {
 }
 
 @Composable
-private fun PredictorBreakdown(payload: com.nocap.app.diag.PredictionPayload) {
+private fun PredictorBreakdown(payload: PredictionPayload) {
     Column {
         Text(
             "Predictor breakdown",
@@ -486,3 +477,72 @@ private fun PredictorBreakdown(payload: com.nocap.app.diag.PredictionPayload) {
     }
 }
 
+@Composable
+private fun ClassifyStrip(
+    currentImportance: Int?,
+    onClassify: (NotificationListViewModel.Choice) -> Unit,
+) {
+    val activeChoice = currentImportance?.let { imp ->
+        when {
+            imp >= 7 -> NotificationListViewModel.Choice.IMPORTANT
+            imp >= 4 -> NotificationListViewModel.Choice.NEUTRAL
+            else -> NotificationListViewModel.Choice.JUNK
+        }
+    }
+    Column {
+        Text(
+            "Your verdict (trains the model):",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(Modifier.height(6.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            ClassifyButton(
+                label = "Important",
+                active = activeChoice == NotificationListViewModel.Choice.IMPORTANT,
+                activeColor = Color(0xFF2E7D32),
+                onClick = { onClassify(NotificationListViewModel.Choice.IMPORTANT) },
+            )
+            ClassifyButton(
+                label = "Neutral",
+                active = activeChoice == NotificationListViewModel.Choice.NEUTRAL,
+                activeColor = Color(0xFF6D6D6D),
+                onClick = { onClassify(NotificationListViewModel.Choice.NEUTRAL) },
+            )
+            ClassifyButton(
+                label = "Junk",
+                active = activeChoice == NotificationListViewModel.Choice.JUNK,
+                activeColor = Color(0xFFC62828),
+                onClick = { onClassify(NotificationListViewModel.Choice.JUNK) },
+            )
+        }
+    }
+}
+
+@Composable
+private fun ClassifyButton(
+    label: String,
+    active: Boolean,
+    activeColor: Color,
+    onClick: () -> Unit,
+) {
+    if (active) {
+        Button(
+            onClick = onClick,
+            colors = ButtonDefaults.buttonColors(
+                containerColor = activeColor,
+                contentColor = Color.White,
+            )
+        ) { Text(label, style = MaterialTheme.typography.labelSmall) }
+    } else {
+        OutlinedButton(onClick = onClick) {
+            Text(label, style = MaterialTheme.typography.labelSmall)
+        }
+    }
+}
+
+private fun importanceColor(importance: Int): Color = when {
+    importance >= 8 -> Color(0xFFB9F6CA)
+    importance >= 5 -> Color(0xFFFFF59D)
+    else -> Color(0xFFFFCDD2)
+}
