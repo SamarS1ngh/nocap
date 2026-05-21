@@ -58,7 +58,7 @@ class NocapNotificationListenerService : NotificationListenerService() {
     ) {
         // Skip cancellations we initiated ourselves — they'd label our own predictions.
         if (reason == REASON_LISTENER_CANCEL) return
-        if (reason !in setOf(REASON_CLICK, REASON_CANCEL, REASON_APP_CANCEL)) return
+        if (reason !in setOf(REASON_CLICK, REASON_CANCEL, REASON_CANCEL_ALL, REASON_APP_CANCEL)) return
 
         // Snapshot interactive state + actions BEFORE going async — the SBN
         // reference and the screen state are freshest right here.
@@ -80,9 +80,13 @@ class NocapNotificationListenerService : NotificationListenerService() {
 
                 // Per-notification swipe. Trust the user — if they specifically
                 // dismissed this row, it's a SKIP signal. Timing irrelevant.
-                // (Clear-all is REASON_CANCEL_ALL = 3, NOT in our allow-list, so
-                // batch shade-clears are correctly ignored.)
                 REASON_CANCEL -> 0.0f to "swipe"
+
+                // Clear-all button hits every notification in the shade at once.
+                // User explicitly opted to wipe them all → label every one as SKIP.
+                // Source is distinct ("clear_all") so the UI / diagnostics can show
+                // it differently from per-notification swipes.
+                REASON_CANCEL_ALL -> 0.0f to "clear_all"
 
                 // App-driven cancel — usually fires after the user used an inline
                 // action (Reply / Mark read / Like / ...). We can't observe the
@@ -313,6 +317,7 @@ class NocapNotificationListenerService : NotificationListenerService() {
         // the full reason enum surface.
         private const val REASON_CLICK = 1
         private const val REASON_CANCEL = 2
+        private const val REASON_CANCEL_ALL = 3
         private const val REASON_APP_CANCEL = 5
         private const val REASON_LISTENER_CANCEL = 10
 
