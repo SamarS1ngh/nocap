@@ -23,6 +23,26 @@ class NocapNotificationListenerService : NotificationListenerService() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
+    override fun onListenerConnected() {
+        super.onListenerConnected()
+        // Warm the hybrid predictor as soon as the system binds us — without this,
+        // the FIRST notification that arrives while the app is fully backgrounded
+        // pays a 90MB TFLite-mmap cost on a low-priority worker thread. That init
+        // sometimes silently fails under memory pressure, leaving the predictor
+        // permanently null and every background notification stuck on FAILED.
+        // Doing it here ensures the predictor is ready before any notification.
+        val app = applicationContext as NocapApp
+        scope.launch {
+            val available = try {
+                app.hybrid.predictor != null
+            } catch (t: Throwable) {
+                Log.w(TAG, "predictor warm-up threw", t)
+                false
+            }
+            Log.i(TAG, "listener connected, hybrid predictor available=$available")
+        }
+    }
+
     override fun onNotificationPosted(sbn: StatusBarNotification) {
         val app = applicationContext as NocapApp
         val extras = sbn.notification.extras

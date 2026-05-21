@@ -25,7 +25,9 @@ class HybridFactory(private val app: NocapApp) {
     val predictor: HybridPredictor? by lazy { tryBuild() }
 
     private fun tryBuild(): HybridPredictor? = runCatching {
+        Log.i(TAG, "building hybrid predictor")
         val engine = EmbeddingEngine.get(app)
+        Log.d(TAG, "embedding engine ready")
         val store = VectorStore.create(app)
 
         val head = TwoLayerNet().also { net ->
@@ -42,6 +44,7 @@ class HybridFactory(private val app: NocapApp) {
         val alpha = runBlocking { app.prefs.getAlpha() }
         val config = HybridPredictor.Config(alpha = alpha)
 
+        Log.i(TAG, "hybrid predictor built: topPkgs=${topPkgs.size} alpha=$alpha")
         HybridPredictor(
             engine = engine,
             store = store,
@@ -50,7 +53,12 @@ class HybridFactory(private val app: NocapApp) {
             config = config,
             llmFallback = ::geminiFallback,
         )
-    }.onFailure { Log.w(TAG, "predictor unavailable: ${it.message}") }.getOrNull()
+    }.onFailure { t ->
+        // Full stack trace so we can diagnose background-init failures. The
+        // previous one-line message was eating useful info like which asset
+        // was missing or which native lib failed.
+        Log.e(TAG, "predictor unavailable", t)
+    }.getOrNull()
 
     private suspend fun geminiFallback(text: String, ctx: HybridPredictor.PredictContext): Float? {
         val openAi = app.prefs.getOpenAiKey()
