@@ -5,7 +5,7 @@ import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
 
-@Database(entities = [VectorRow::class], version = 1, exportSchema = false)
+@Database(entities = [VectorRow::class], version = 2, exportSchema = false)
 abstract class VectorDatabase : RoomDatabase() {
     abstract fun vectors(): VectorDao
 
@@ -19,7 +19,12 @@ abstract class VectorDatabase : RoomDatabase() {
                     context.applicationContext,
                     VectorDatabase::class.java,
                     "nocap-vectors.db",
-                ).build().also { instance = it }
+                )
+                    // v1 → v2 adds notificationKey + unique index. No user-meaningful
+                    // data lives here yet; drop the table on schema change.
+                    .fallbackToDestructiveMigration()
+                    .build()
+                    .also { instance = it }
             }
     }
 }

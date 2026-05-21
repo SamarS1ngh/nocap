@@ -263,7 +263,7 @@ class NocapNotificationListenerService : NotificationListenerService() {
         val text = (n.title + "\n" + n.text).trim()
         if (text.isBlank()) return
         try {
-            predictor.learn(input, text, label)
+            predictor.learn(input, text, label, notificationKey = n.notificationKey)
             app.hybrid.persistHead()
         } catch (t: Throwable) {
             Log.w(TAG, "learn failed: ${t.message}", t)

@@ -75,6 +75,17 @@ class TwoLayerNetTest {
     }
 
     @Test
+    fun adaptiveBurstFiresOnConsistentHighLoss() {
+        // Net is barely initialized. Feed it 6 maximally-wrong examples in a row —
+        // loss should sit far above the 0.7 initial baseline EMA's drift threshold.
+        val net = TwoLayerNet(inputDim = 4, hiddenDim = 4, seed = 0L)
+        val x = floatArrayOf(0.5f, 0.5f, 0.5f, 0.5f)
+        repeat(8) { net.update(x, 1f, lr = 0.001f) }
+        // After ≥5 high-loss updates a burst should have fired
+        assertTrue("expected adaptiveBurstCount > 0", net.adaptiveBurstCount > 0)
+    }
+
+    @Test
     fun shapeMismatchOnLoadThrows() {
         val net = TwoLayerNet(inputDim = 4, hiddenDim = 3, seed = 0L)
         val file = File(tmp.root, "net.bin")

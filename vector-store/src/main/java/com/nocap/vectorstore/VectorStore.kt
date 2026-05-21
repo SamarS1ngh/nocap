@@ -22,14 +22,15 @@ class VectorStore private constructor(
     )
 
     /**
-     * Insert a new vector. Label may be null (we don't have feedback yet);
-     * such rows are stored but ignored by [nearest] until [setLabel] sets one.
+     * Insert a new vector with no dedup. Prefer [upsert] when you have a
+     * notification key; this exists for backfills/tests and the legacy path.
      */
     suspend fun append(
         vector: FloatArray,
         label: Float?,
         packageName: String,
         postedAt: Long,
+        notificationKey: String? = null,
         metaJson: String? = null,
     ): Long = dao.insert(
         VectorRow(
@@ -37,9 +38,44 @@ class VectorStore private constructor(
             label = label,
             packageName = packageName,
             postedAt = postedAt,
+            notificationKey = notificationKey,
             metaJson = metaJson,
         )
     )
+
+    /**
+     * Idempotent write keyed by [notificationKey]. If a row already exists for
+     * the key, ONLY its label is updated (the embedding for that notification
+     * is fixed — its text didn't change). If no row exists, a new one is
+     * inserted with the given vector.
+     *
+     * Use this from training paths so re-classifying a notification doesn't
+     * leave contradictory duplicate vectors in the store.
+     */
+    suspend fun upsert(
+        notificationKey: String,
+        vector: FloatArray,
+        label: Float,
+        packageName: String,
+        postedAt: Long,
+        metaJson: String? = null,
+    ): Long {
+        val existing = dao.findIdByKey(notificationKey)
+        if (existing != null) {
+            dao.updateLabelByKey(notificationKey, label)
+            return existing
+        }
+        return dao.insert(
+            VectorRow(
+                vectorBytes = FloatArrayCodec.encode(vector),
+                label = label,
+                packageName = packageName,
+                postedAt = postedAt,
+                notificationKey = notificationKey,
+                metaJson = metaJson,
+            )
+        )
+    }
 
     suspend fun setLabel(id: Long, label: Float) = dao.setLabel(id, label)
 

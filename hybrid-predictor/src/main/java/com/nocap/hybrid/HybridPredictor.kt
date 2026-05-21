@@ -5,6 +5,8 @@ import com.nocap.onlinehead.StructuredFeatures
 import com.nocap.onlinehead.TwoLayerNet
 import com.nocap.vectorstore.VectorStore
 import kotlin.math.abs
+import kotlin.math.exp
+import kotlin.math.max
 
 /**
  * Orchestrator. Blends kNN + online-head, falls back to an LLM when local signals
@@ -26,7 +28,11 @@ class HybridPredictor(
 
     data class Config(
         val alpha: Float = 0.6f,
-        val kNeighbours: Int = 5,
+        /**
+         * Number of nearest-neighbour past notifications consulted per prediction.
+         * Bigger k = smoother / more stable. Smaller k = more reactive to rare patterns.
+         */
+        val kNeighbours: Int = 10,
         val knnSimilarityThreshold: Float = 0.7f,
         val knnMinNeighbours: Int = 3,
         val disagreementThreshold: Float = 0.4f,
@@ -36,6 +42,14 @@ class HybridPredictor(
         val pruneOver: Int = 50_000,
         /** Drop rows older than this when pruning fires. Default 90 days. */
         val pruneCutoffAgeMs: Long = 90L * 24 * 60 * 60 * 1000,
+        /**
+         * Half-life (ms) for exponential recency weighting of kNN votes.
+         * A neighbour's vote is multiplied by max(knnMinWeight, exp(-age/halfLife)).
+         * Default 180 days: recent votes dominate but ancient ones still contribute.
+         */
+        val knnRecencyHalfLifeMs: Long = 180L * 24 * 60 * 60 * 1000,
+        /** Floor for kNN vote weight — old neighbours can never go fully silent. */
+        val knnMinWeight: Float = 0.2f,
     )
 
     enum class Source { LLM_COLD_START, KNN_ONLY, HEAD_ONLY, BLEND, LLM_DISAGREEMENT, FALLBACK_DEFAULT }
@@ -72,28 +86,48 @@ class HybridPredictor(
         val combined = concat(embedding, structured)
 
         val neighbours = store.nearest(embedding, config.kNeighbours)
-        val pKnn = computeKnn(neighbours)
+        val nowMs = System.currentTimeMillis()
+        val pKnn = computeKnn(neighbours, nowMs)
         val pHead = if (storeSize >= config.suppressHeadUnder) head.predict(combined) else null
 
         return decide(ctx, text, neighbours, pKnn, pHead)
     }
 
-    /** Apply a labeled example to both store and head. LR is decayed by the head's own schedule. */
+    /**
+     * Apply a labeled example to both store and head. LR is decayed by the
+     * head's own schedule.
+     *
+     * @param notificationKey StatusBarNotification.key — used as the vector-store
+     *        dedup key so re-classifying the same notification doesn't leave
+     *        contradictory duplicate vectors. Null means "no dedup; always append"
+     *        (only legitimate for tests or backfills).
+     */
     suspend fun learn(
         input: StructuredFeatures.Input,
         text: String,
         label: Float,
+        notificationKey: String?,
         baseLr: Float = TwoLayerNet.DEFAULT_LR,
     ) {
         val embedding = engine.encode(text)
         val structured = features.extract(input)
         val combined = concat(embedding, structured)
-        store.append(
-            vector = embedding,
-            label = label,
-            packageName = input.packageName,
-            postedAt = input.postedAtMs,
-        )
+        if (notificationKey != null) {
+            store.upsert(
+                notificationKey = notificationKey,
+                vector = embedding,
+                label = label,
+                packageName = input.packageName,
+                postedAt = input.postedAtMs,
+            )
+        } else {
+            store.append(
+                vector = embedding,
+                label = label,
+                packageName = input.packageName,
+                postedAt = input.postedAtMs,
+            )
+        }
         head.update(combined, label, head.decayedLr(baseLr))
         store.pruneIfOversized(config.pruneOver, config.pruneCutoffAgeMs)
     }
@@ -124,13 +158,25 @@ class HybridPredictor(
         }
     }
 
-    private fun computeKnn(neighbours: List<VectorStore.Hit>): Float? {
+    /**
+     * Recency-weighted mean of neighbour labels.
+     * weight(i) = max(knnMinWeight, exp(-age_i / halfLife))
+     */
+    private fun computeKnn(neighbours: List<VectorStore.Hit>, nowMs: Long): Float? {
         if (neighbours.size < config.knnMinNeighbours) return null
         val topSim = neighbours.first().similarity
         if (topSim < config.knnSimilarityThreshold) return null
-        var sum = 0f
-        for (h in neighbours) sum += h.label
-        return sum / neighbours.size
+
+        var sumW = 0f
+        var sumWL = 0f
+        for (h in neighbours) {
+            val ageMs = (nowMs - h.postedAt).coerceAtLeast(0L)
+            val expWeight = exp(-ageMs.toDouble() / config.knnRecencyHalfLifeMs).toFloat()
+            val w = max(config.knnMinWeight, expWeight)
+            sumW += w
+            sumWL += w * h.label
+        }
+        return if (sumW <= 0f) null else sumWL / sumW
     }
 
     private fun concat(embedding: FloatArray, structured: FloatArray): FloatArray {

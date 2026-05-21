@@ -9,6 +9,7 @@ import androidx.room.PrimaryKey
     indices = [
         Index("postedAt"),
         Index("packageName"),
+        Index("notificationKey", unique = true),
     ],
 )
 data class VectorRow(
@@ -18,6 +19,13 @@ data class VectorRow(
     val label: Float?,
     val packageName: String,
     val postedAt: Long,
+    /**
+     * Source notification's StatusBarNotification.key. Used as the upsert
+     * dedup key so re-classifying a notification updates the existing row
+     * instead of appending a duplicate. Null only for legacy rows produced
+     * before this column existed.
+     */
+    val notificationKey: String?,
     /** JSON blob of arbitrary metadata. Null when not needed. */
     val metaJson: String?,
 ) {
@@ -30,6 +38,7 @@ data class VectorRow(
             label == other.label &&
             packageName == other.packageName &&
             postedAt == other.postedAt &&
+            notificationKey == other.notificationKey &&
             metaJson == other.metaJson
     }
 
@@ -39,6 +48,7 @@ data class VectorRow(
         r = 31 * r + (label?.hashCode() ?: 0)
         r = 31 * r + packageName.hashCode()
         r = 31 * r + postedAt.hashCode()
+        r = 31 * r + (notificationKey?.hashCode() ?: 0)
         r = 31 * r + (metaJson?.hashCode() ?: 0)
         return r
     }

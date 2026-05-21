@@ -25,6 +25,12 @@ interface VectorDao {
     @Query("UPDATE vector_rows SET label = :label WHERE id = :id")
     suspend fun setLabel(id: Long, label: Float)
 
+    @Query("SELECT id FROM vector_rows WHERE notificationKey = :key LIMIT 1")
+    suspend fun findIdByKey(key: String): Long?
+
+    @Query("UPDATE vector_rows SET label = :label WHERE notificationKey = :key")
+    suspend fun updateLabelByKey(key: String, label: Float)
+
     @Query("DELETE FROM vector_rows WHERE postedAt < :cutoffMs")
     suspend fun deleteOlderThan(cutoffMs: Long): Int
 

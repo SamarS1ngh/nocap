@@ -76,7 +76,7 @@ class NotificationListViewModel(application: Application) : AndroidViewModel(app
             postedAtMs = row.postedAt,
         )
         try {
-            predictor.learn(input, text, label)
+            predictor.learn(input, text, label, notificationKey = row.notificationKey)
             app.hybrid.persistHead()
         } catch (t: Throwable) {
             Log.w(TAG, "predictor.learn failed: ${t.message}")

@@ -35,6 +35,17 @@ class TwoLayerNet(
     var updateCount: Long = 0L
         private set
 
+    // ---- Adaptive LR state (drift-detection burst mode) ----
+    // EMA-smoothed long-term loss baseline. When recent losses sit far above this
+    // for several updates in a row, we briefly boost LR so the head can catch up
+    // to the user's new behaviour without permanently jittering the weights.
+    private var driftBaseline: Float = DRIFT_INITIAL_BASELINE
+    private var consecutiveHighLossUpdates: Int = 0
+    private var adaptiveBoostBudget: Int = 0
+    /** Total adaptive LR burst events the head has lived through. Useful for diagnostics. */
+    var adaptiveBurstCount: Long = 0L
+        private set
+
     /**
      * Ring buffer of recent BCE losses, one per update() call. Read via [lossHistory].
      * In-memory only; not persisted across process restarts.
@@ -89,13 +100,46 @@ class TwoLayerNet(
      * @return loss BEFORE this update (handy for monitoring)
      */
     /**
-     * Decayed LR: halves every [DECAY_EVERY_N_UPDATES] updates, floored at [MIN_LR].
-     * Pass the base LR; receive a possibly-smaller effective LR.
+     * Effective LR for the next update. Combines two mechanisms:
+     *
+     *   1. Slow age-based decay — halves every [DECAY_EVERY_N_UPDATES], floored at [MIN_LR].
+     *      Keeps stable predictions stable.
+     *   2. Adaptive burst — if drift was detected on a recent update, return a higher
+     *      LR ([ADAPTIVE_BURST_LR]) for the next [ADAPTIVE_BURST_LENGTH] calls. Lets the
+     *      head catch up quickly when user behaviour drifts.
+     *
+     * Consuming the burst counts as one of its budgeted updates, so this method
+     * mutates state. Call exactly once per update().
      */
     fun decayedLr(baseLr: Float = DEFAULT_LR): Float {
+        if (adaptiveBoostBudget > 0) {
+            adaptiveBoostBudget--
+            return ADAPTIVE_BURST_LR
+        }
         val halvings = updateCount / DECAY_EVERY_N_UPDATES
         val factor = if (halvings <= 0) 1f else 1f / (1L shl halvings.coerceAtMost(20).toInt())
         return (baseLr * factor).coerceAtLeast(MIN_LR)
+    }
+
+    /** True if the head is currently inside an adaptive LR burst. */
+    fun isAdaptiveBurstActive(): Boolean = adaptiveBoostBudget > 0
+
+    /**
+     * Track loss for drift detection. Run after each update with the just-computed
+     * loss. Triggers an adaptive burst when:
+     *   - the loss exceeds [DRIFT_MULTIPLIER] × baseline EMA, AND
+     *   - this has held for [DRIFT_CONSECUTIVE_THRESHOLD] consecutive updates,
+     *   - and we're not already inside a burst.
+     */
+    private fun observeLossForDrift(loss: Float) {
+        driftBaseline = (1 - DRIFT_EMA_ALPHA) * driftBaseline + DRIFT_EMA_ALPHA * loss
+        val isHigh = loss > driftBaseline * DRIFT_MULTIPLIER
+        consecutiveHighLossUpdates = if (isHigh) consecutiveHighLossUpdates + 1 else 0
+        if (consecutiveHighLossUpdates >= DRIFT_CONSECUTIVE_THRESHOLD && adaptiveBoostBudget == 0) {
+            adaptiveBoostBudget = ADAPTIVE_BURST_LENGTH
+            adaptiveBurstCount++
+            consecutiveHighLossUpdates = 0
+        }
     }
 
     fun update(x: FloatArray, y: Float, lr: Float = DEFAULT_LR): Float {
@@ -138,6 +182,7 @@ class TwoLayerNet(
         lossRing[lossWriteIndex] = loss
         lossWriteIndex = (lossWriteIndex + 1) % LOSS_RING_SIZE
         if (lossFilled < LOSS_RING_SIZE) lossFilled++
+        observeLossForDrift(loss)
         return loss
     }
 
@@ -223,9 +268,32 @@ class TwoLayerNet(
         const val DEFAULT_INPUT_DIM = 435
         const val DEFAULT_HIDDEN_DIM = 100
         const val DEFAULT_LR = 0.01f
-        const val MIN_LR = 1e-5f
+        /**
+         * LR can never decay below this. Higher floor (vs the old 1e-5) keeps the
+         * head responsive to behaviour drift instead of going effectively dead
+         * after ~50K updates.
+         */
+        const val MIN_LR = 5e-4f
         const val DECAY_EVERY_N_UPDATES = 5_000L
         const val LOSS_RING_SIZE = 1_000
+
+        // ---- Adaptive LR drift detection ----
+        /**
+         * Initial EMA before any losses observed. Set near "what a settled head's
+         * loss looks like" (~0.2 binary cross-entropy) so the first time loss
+         * spikes well above settled — cold start, or drift — adaptive can fire.
+         */
+        private const val DRIFT_INITIAL_BASELINE = 0.2f
+        /** Smoothing factor for the loss baseline EMA. Smaller = more inertia. */
+        private const val DRIFT_EMA_ALPHA = 0.02f
+        /** A loss must exceed baseline × this to count as "high." */
+        private const val DRIFT_MULTIPLIER = 2.0f
+        /** N consecutive high-loss updates before an adaptive burst fires. */
+        private const val DRIFT_CONSECUTIVE_THRESHOLD = 5
+        /** How many updates a burst lasts. */
+        private const val ADAPTIVE_BURST_LENGTH = 100
+        /** Boosted LR used during a burst. */
+        private const val ADAPTIVE_BURST_LR = 0.005f
 
         private const val MAGIC = 0x4F484541  // "OHEA"
         private const val VERSION = 1
