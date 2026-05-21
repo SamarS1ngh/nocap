@@ -306,6 +306,118 @@ When transplanting to another project (Jarvis voice memory, personal RAG):
 
 This design holds in any language. Re-implement in target stack using native libraries (JS: transformers.js + hnswlib-node + tf.js; Python: sentence-transformers + faiss + scikit-learn; Swift: CoreML + Annoy).
 
+## Learning refinements (portable across domains)
+
+These are concepts we landed on while building nocap that are NOT notification-specific. They apply to any single-user hybrid kNN + online-head pipeline. Carry them into Jarvis / personal RAG / any future re-implementation.
+
+### 1. Recency-weighted kNN vote, not uniform mean
+
+Naive kNN takes `mean(neighbour_labels)`. Old votes and fresh votes count equally. A user whose preferences drift over months is held hostage by their old self.
+
+Fix: weight each neighbour by exponential recency.
+
+```
+weight_i = max(MIN_WEIGHT, exp(-age_i / HALF_LIFE))
+p_knn = Σ(weight_i · label_i) / Σ weight_i
+```
+
+Default tunings:
+- `HALF_LIFE = 180 days` — recent dominates, ancient still audible
+- `MIN_WEIGHT = 0.2` — old votes can't be fully steamrolled by a single fresh tap
+
+Pros: smooth drift adaptation, no data deleted, no hard cutoff cliff.
+Cons: single fresh signal weighs heavily — partly mitigated by larger k (see below).
+
+### 2. Pick k for the noise / specificity tradeoff
+
+Smaller k = picks up rare specific patterns, more reactive, noisier.
+Larger k = stable, smoother, slower to adapt.
+
+`k = 10` is a good default for personal-preference tasks. Pairs well with recency weighting (more votes = more ballast against single-event shock; recency weight already discounts old ones so larger k doesn't dilute the recent signal).
+
+### 3. LR floor, not pure decay
+
+A schedule that halves every N updates and floors at 1e-5 makes the head functionally dead after ~year. New "I changed my mind" gradients cannot move weights anymore.
+
+Fix: floor LR at `5e-4`. Head stays ~100× more reactive than the old floor without permanently jittering settled predictions.
+
+### 4. Adaptive LR burst on drift
+
+Even with the floor, drift adaptation is slow. Layer a state-machine on top:
+
+- Maintain an EMA of recent loss (`baseline`).
+- When a single update's loss exceeds `2 × baseline` for `5` consecutive updates → "drift event."
+- Boost LR to `5e-3` (10× the floor) for the next `100` updates, then revert.
+
+State is in-memory only; survives only the process lifetime. Resets are cheap if the head ever ships fresh.
+
+Pros: stable when stable, fast when needed, self-healing.
+Cons: tuning the EMA alpha / trigger threshold is empirical; expect to dial it on real data.
+
+### 5. Upsert by entity key, not append-always
+
+Naively, every `learn(x, label)` call appends a new vector to the store. If the same entity gets re-labeled (user changed their mind, or the system collected two signals from one source), the store now has two contradictory vectors that cancel each other in the kNN vote and confuse the head with contradictory gradients.
+
+Fix: every learnable item has a stable identifier (notification key, message id, document id). The store schema has a UNIQUE index on it. `store.upsert(key, vec, label)` updates the existing row's label if the key already exists, otherwise inserts. The embedding stays fixed (same text → same vector); only the label changes.
+
+This single change avoids the "model gets dumber the more I correct it" failure mode.
+
+### 6. Abstain when the signal is ambiguous
+
+Three labels, not two:
+- WANT (+1)
+- SKIP (0)
+- **ABSTAIN** (no label written, model unchanged)
+
+Use ABSTAIN whenever the signal you observed could plausibly mean either WANT or SKIP. For nocap: a notification that was re-posted multiple times and then swiped (could be reply-then-cleanup OR spam-then-cleanup). For a personal RAG: a document that was opened then closed without bookmarking (could be relevant-but-handled OR irrelevant).
+
+Confidently-wrong labels poison the model. Silence is safer than noise.
+
+### 7. Neutral choices don't train
+
+Manual classification UIs often offer three options: Important / Neutral / Junk. The mathematical impulse is to map Neutral to `label = 0.5`.
+
+Don't. A label of 0.5 with BCE gradient pushes weights halfway in both directions on every update → noise. The model learns nothing useful from neutral examples; it just wobbles.
+
+Skip the call to `predictor.learn` for neutral choices. Update the importance / metadata for filtering, but don't train.
+
+### 8. Eager init of expensive on-device assets
+
+If the model file is large (~90MB MiniLM TFLite) and load is lazy, the FIRST inference triggers the load. If that first inference fires under memory pressure (background process, after device sleep), mmap can fail silently. The lazy then caches `null` and every subsequent request fails for the rest of the process.
+
+Fix: trigger the lazy at a known-good moment — service-bind / app-launch / OS-startup callback. Catch and log the throwable fully (stack trace, not `.message`).
+
+### 9. Loss ring buffer for diagnostics
+
+Keep the last N (~1000) BCE losses in a fixed-size ring inside the head. Cheap (~4 KB). Surface in a diagnostics screen. Lets the user (and you) eyeball whether the model is converging or drifting blind.
+
+### 10. UI distinguishes verdict from provenance
+
+Two pieces of metadata per labeled example:
+- **Verdict** — what was decided (WANT / NEUTRAL / SKIP, or 0–10 importance)
+- **Provenance** — how the verdict was obtained (`click`, `swipe`, `manual`, `app_action`, `clear_all`, ...)
+
+Keep them separate in the DB and in the UI. Both fields help debug bad predictions later — "model thinks football is junk; what did I do to teach it that?"
+
+### 11. Recency weighting beats hard pruning
+
+When in doubt between deleting old data and softly discounting it, prefer the discount. Deletion is irreversible. Recency weighting lets you reverse course by adjusting the half-life. Old data can be re-activated if the discount turns out to be too aggressive.
+
+Reserve hard pruning for storage-pressure / search-cost regimes (>50K rows), not for drift handling.
+
+### 12. Distinguish "no data" from "model said no"
+
+In the predictor's output, the source enum should carry the full causal story:
+
+- `LLM_COLD_START` — store too small, used LLM as substitute
+- `KNN_ONLY` — head suppressed (store < N), kNN alone decided
+- `HEAD_ONLY` — kNN abstained (no confident neighbours), head decided alone
+- `BLEND` — both signals available and agreed within disagreement threshold
+- `LLM_DISAGREEMENT` — kNN and head disagreed, LLM tiebroke
+- `FALLBACK_DEFAULT` — LLM needed but unavailable (no key); model output is a guess
+
+When a model fails, the failure mode matters more than the wrong answer. Don't collapse the source down to a single boolean "did we use the LLM?" — keep the full enum so diagnostics can show *why* a row got the prediction it did.
+
 ## Build phases (nocap-specific)
 
 1. **Foundation:** `:embedding-engine`, `:vector-store`. Standalone, tested. ~1.5 weeks.
@@ -317,14 +429,17 @@ This design holds in any language. Re-implement in target stack using native lib
 ## Open decisions
 
 - α (kNN vs head weight): start 0.6 favoring kNN, tune empirically. Shift toward 0.4 (favor head) once head trains past ~2000 labels.
-- k (neighbours): start 5.
+- **k (neighbours): 10** (was 5 in the v0 spec; bumped after kNN proved too jittery in early testing).
 - Similarity threshold to trust kNN: start 0.7 cosine.
+- **kNN vote weighting: recency-weighted with 180-day half-life, min weight 0.2.** Replaces uniform mean.
 - **Head architecture: two-layer (435 → 100 hidden → 1) with ReLU.** Hidden size 100 is starting point; tunable in 64-256 range.
-- Learning rate: start 0.01. Add decay (e.g., halve every 5000 updates) once data is plentiful.
+- **Learning rate:** start 0.01, halve every 5000 updates, **floor at 5e-4** (not 1e-5 — that froze the head after ~1 year).
+- **Adaptive LR burst:** when 5 consecutive losses exceed 2× EMA baseline, boost LR to 5e-3 for 100 updates.
 - Activation: ReLU in hidden layer. Sigmoid on output. Standard.
-- Store pruning: by age, by inverse-utility, or never? Decide at 50K+ rows.
+- Store pruning: deferred. Recency weighting handles drift without deletion. Hard prune only if rows > 50K.
 - Disagreement threshold to trigger LLM fallback: |P_knn − P_head| > 0.4 — start there.
 - When to suppress head's vote: until vector-store has ~500 labels (head considered unreliable below that).
+- **Upsert by entity key** (notificationKey here) — `learn()` updates existing row's label, never appends a duplicate.
 
 ## Non-goals
 
@@ -358,3 +473,10 @@ This design holds in any language. Re-implement in target stack using native lib
 - **Dim / dimensions:** number of slots in a vector. "384-dim vector" = list of 384 numbers.
 - **Online learning:** updating the model one example at a time as data arrives, vs batch training all at once.
 - **α (alpha):** mixing weight in `α·P_knn + (1-α)·P_head`.
+- **Recency weighting:** giving more weight to recent neighbour votes than old ones, via `exp(-age / half_life)`. Used so kNN can adapt to drift without losing old data.
+- **Half-life:** time after which a recency weight has dropped to 0.5. Tunes how fast preferences "fade." 180 days = gentle.
+- **LR floor:** minimum value the learning rate can decay to. Keeps the head perpetually able to absorb new information.
+- **Adaptive LR burst:** temporary LR boost triggered when loss baseline spikes — drift response built into the head.
+- **Upsert:** "insert or update" — write keyed by a stable identifier so re-labeling the same entity doesn't create a duplicate row.
+- **Abstain:** decide not to write a label at all when the observed signal is ambiguous. Silence is safer than a wrong label.
+- **Provenance:** the source channel that produced a label (`click`, `swipe`, `app_action`, `manual`, ...). Stored alongside the verdict for diagnostics.
