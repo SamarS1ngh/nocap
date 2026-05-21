@@ -275,11 +275,10 @@ private fun CardTopRow(
             modifier = Modifier.weight(1f),
         )
         ManualClassifyBadge(n)
-        // FeedbackBadge only for IMPLICIT signals from the shade — manual-classify
-        // overlaps with ManualClassifyBadge above so we hide it for manual rows.
-        if (n.category != "manual") {
-            FeedbackBadge(feedback = n.feedback, source = n.feedbackSource)
-        }
+        // ManualClassifyBadge shows the VERDICT (⭐/○/✗ from importance).
+        // FeedbackBadge shows the SOURCE (tapped/swiped/manual). Both convey
+        // different info — show both when present.
+        FeedbackBadge(feedback = n.feedback, source = n.feedbackSource)
         if (n.category == "failed") {
             Spacer(Modifier.width(6.dp))
             AssistChip(

@@ -230,10 +230,27 @@ class NocapNotificationListenerService : NotificationListenerService() {
         source: String,
     ) {
         val feedbackInt = if (label >= 0.5f) 1 else -1
+        val dao = app.database.notifications()
         try {
-            app.database.notifications().setFeedback(n.id, feedbackInt, source)
+            dao.setFeedback(n.id, feedbackInt, source)
         } catch (t: Throwable) {
             Log.w(TAG, "setFeedback failed: ${t.message}", t)
+        }
+
+        // If the row never got a successful classification (or stuck on FAILED),
+        // promote the shade action itself to a classification. The user just told
+        // us what they thought of it — that's a stronger signal than "unknown."
+        if (n.category == null || n.category == "failed" || n.importance == null) {
+            val importanceFromLabel = if (label >= 0.5f) 9 else 1
+            try {
+                dao.applyManualImportance(
+                    id = n.id,
+                    importance = importanceFromLabel,
+                    classifiedAt = System.currentTimeMillis(),
+                )
+            } catch (t: Throwable) {
+                Log.w(TAG, "applyManualImportance failed: ${t.message}", t)
+            }
         }
 
         val predictor = app.hybrid.predictor ?: return
