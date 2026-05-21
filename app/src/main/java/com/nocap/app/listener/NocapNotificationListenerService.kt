@@ -2,6 +2,7 @@ package com.nocap.app.listener
 
 import android.content.ComponentName
 import android.content.Context
+import android.os.PowerManager
 import android.provider.Settings
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
@@ -59,8 +60,10 @@ class NocapNotificationListenerService : NotificationListenerService() {
         if (reason == REASON_LISTENER_CANCEL) return
         if (reason !in setOf(REASON_CLICK, REASON_CANCEL, REASON_APP_CANCEL)) return
 
-        // Capture this BEFORE we go async — the SBN reference is freshest here.
+        // Snapshot interactive state + actions BEFORE going async — the SBN
+        // reference and the screen state are freshest right here.
         val hadActions = (sbn.notification.actions?.size ?: 0) > 0
+        val interactiveNow = (getSystemService(POWER_SERVICE) as? PowerManager)?.isInteractive ?: false
 
         val app = applicationContext as NocapApp
         scope.launch {
@@ -71,20 +74,26 @@ class NocapNotificationListenerService : NotificationListenerService() {
                 null
             } ?: return@launch
 
-            val dwellMs = System.currentTimeMillis() - row.postedAt
             val labelAndSource: Pair<Float, String> = when (reason) {
+                // Tap → user opened. Always WANT, regardless of when.
                 REASON_CLICK -> 1.0f to "click"
-                REASON_CANCEL ->
-                    if (dwellMs < FAST_SWIPE_MS) 0.0f to "fast_swipe" else return@launch
+
+                // Per-notification swipe. Trust the user — if they specifically
+                // dismissed this row, it's a SKIP signal. Timing irrelevant.
+                // (Clear-all is REASON_CANCEL_ALL = 3, NOT in our allow-list, so
+                // batch shade-clears are correctly ignored.)
+                REASON_CANCEL -> 0.0f to "swipe"
+
+                // App-driven cancel — usually fires after the user used an inline
+                // action (Reply / Mark read / Like / ...). We can't observe the
+                // action directly, so we infer:
+                //   - the notification had ≥1 action (something to interact with),
+                //   - the phone was interactive at remove time (a human was present).
+                // Background sync cancellations on a locked phone fall through.
                 REASON_APP_CANCEL ->
-                    // App-driven cancel after a user action (Reply / Mark read / Like / ...).
-                    // We can't see the action itself; infer engagement from:
-                    //   - the notification exposed ≥1 inline action,
-                    //   - it disappeared in a plausible user-driven timeframe.
-                    // Outside those gates it's likely a background sync cancellation — ignore.
-                    if (hadActions && dwellMs < APP_ACTION_MAX_DWELL_MS)
-                        1.0f to "app_action"
+                    if (hadActions && interactiveNow) 1.0f to "app_action"
                     else return@launch
+
                 else -> return@launch
             }
 
@@ -300,12 +309,6 @@ class NocapNotificationListenerService : NotificationListenerService() {
 
     companion object {
         private const val TAG = "NocapListener"
-        private const val FAST_SWIPE_MS = 5_000L
-        // Generous: any user-driven action (reply, mark-read, like) should land
-        // well inside a minute. Beyond that, the app probably auto-cleaned for
-        // an unrelated reason.
-        private const val APP_ACTION_MAX_DWELL_MS = 60_000L
-
         // Mirror of platform constants — keep here so the module doesn't drag in
         // the full reason enum surface.
         private const val REASON_CLICK = 1

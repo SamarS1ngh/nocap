@@ -398,7 +398,7 @@ private fun FeedbackBadge(feedback: Int, source: String?) {
         append(if (wanted) "✓ WANT" else "✗ SKIP")
         when (source) {
             "click" -> append(" · tapped")
-            "fast_swipe" -> append(" · swiped")
+            "swipe", "fast_swipe" -> append(" · swiped")
             "app_action" -> append(" · acted")
             "manual" -> append(" · manual")
             null -> Unit
