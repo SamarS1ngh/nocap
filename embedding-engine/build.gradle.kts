@@ -36,6 +36,11 @@ android {
 dependencies {
     implementation("org.tensorflow:tensorflow-lite:2.16.1")
     implementation("org.tensorflow:tensorflow-lite-support:0.4.4")
+    // Flex delegate: the converted MiniLM graph contains TF Select ops (e.g.
+    // FlexErf in the GELU activation) that the core runtime can't run. Without
+    // this, Interpreter init throws at allocateTensors and the predictor stays
+    // null. Keep the version in lockstep with tensorflow-lite above.
+    implementation("org.tensorflow:tensorflow-lite-select-tf-ops:2.16.1")
 
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.1")
