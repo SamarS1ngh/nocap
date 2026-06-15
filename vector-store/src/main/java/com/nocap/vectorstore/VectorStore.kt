@@ -82,13 +82,20 @@ class VectorStore private constructor(
     /**
      * Top-k labeled rows by cosine similarity. Returns descending sim.
      * Assumes stored vectors are L2-normalized (EmbeddingEngine guarantees this).
+     *
+     * When [packageName] is non-null, only rows from that package are considered.
+     * Same-app neighbours keep the kNN vote from bleeding across apps — e.g. a job
+     * alert shouldn't borrow "want" votes from chat notifications that merely embed
+     * close to it. Callers fall back to the global (packageName = null) search when
+     * an app has too few of its own labeled rows to vote.
      */
-    suspend fun nearest(query: FloatArray, k: Int): List<Hit> {
+    suspend fun nearest(query: FloatArray, k: Int, packageName: String? = null): List<Hit> {
         val rows = dao.allLabeled()
         if (rows.isEmpty()) return emptyList()
 
         val scored = ArrayList<Hit>(rows.size)
         for (row in rows) {
+            if (packageName != null && row.packageName != packageName) continue
             val vec = FloatArrayCodec.decode(row.vectorBytes)
             if (vec.size != query.size) continue  // skip dim mismatch (model upgrade scenario)
             val sim = Cosine.similarityNormalized(query, vec)

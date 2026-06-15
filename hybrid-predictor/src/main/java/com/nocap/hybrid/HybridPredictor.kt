@@ -37,7 +37,12 @@ class HybridPredictor(
         val knnMinNeighbours: Int = 3,
         val disagreementThreshold: Float = 0.4f,
         val coldStartUnder: Int = 30,        // store size below this → LLM only
-        val suppressHeadUnder: Int = 500,    // store size below this → ignore head vote
+        // Store size below this → ignore the online head's vote (kNN only).
+        // The store grows ONLY on explicit user feedback, so 500 was effectively
+        // unreachable — the head trained on every feedback event but never got to
+        // vote, leaving every prediction kNN-only and mushy. 50 lets the head start
+        // contributing once it has a real (if small) training signal.
+        val suppressHeadUnder: Int = 50,
         /** Store row count that triggers age-based pruning on next learn(). */
         val pruneOver: Int = 50_000,
         /** Drop rows older than this when pruning fires. Default 90 days. */
@@ -85,7 +90,14 @@ class HybridPredictor(
         val structured = features.extract(input)
         val combined = concat(embedding, structured)
 
-        val neighbours = store.nearest(embedding, config.kNeighbours)
+        // Prefer same-app neighbours so the kNN vote reflects how THIS app's
+        // notifications have been treated, not whatever happens to embed nearby
+        // across every app. Fall back to the global search when the app hasn't
+        // accumulated enough of its own labeled rows to vote on its own.
+        val sameApp = store.nearest(embedding, config.kNeighbours, input.packageName)
+        val neighbours =
+            if (sameApp.size >= config.knnMinNeighbours) sameApp
+            else store.nearest(embedding, config.kNeighbours)
         val nowMs = System.currentTimeMillis()
         val pKnn = computeKnn(neighbours, nowMs)
         val pHead = if (storeSize >= config.suppressHeadUnder) head.predict(combined) else null
